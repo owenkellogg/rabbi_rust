@@ -1,38 +1,32 @@
-pub mod ws_server;
-
-use tokio::net::TcpListener;
-use tokio_tungstenite::accept_async;
-use tokio_tungstenite::tungstenite::protocol::Message;
-use futures_util::sink::SinkExt;
-use futures_util::stream::StreamExt;
+use futures_util::{StreamExt, SinkExt};
+use warp::Filter;
 use std::net::SocketAddr;
+use tokio::sync::oneshot;
 
-pub async fn start_ws_server(addr: SocketAddr) {
-    let listener = TcpListener::bind(&addr).await.expect("Failed to bind address");
-    loop {
-        if let Ok((stream, _)) = listener.accept().await {
-            tokio::spawn(handle_connection(stream));
-        }
-    }
-}
-
-async fn handle_connection(stream: tokio::net::TcpStream) {
-    let ws_stream = accept_async(stream)
-        .await
-        .expect("Error during WebSocket handshake");
-
-    let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-
-    while let Some(message) = ws_receiver.next().await {
-        match message {
-            Ok(msg) => {
-                if msg.is_text() || msg.is_binary() {
-                    ws_sender.send(Message::text("Hello from server!")).await.expect("Failed to send message");
+pub async fn start_ws_server(addr: SocketAddr, ready_tx: oneshot::Sender<()>) -> Result<(), warp::Error> {
+    let ws_route = warp::path("socket")
+        .and(warp::ws())
+        .map(|ws: warp::ws::Ws| {
+            ws.on_upgrade(|websocket: warp::ws::WebSocket| {
+                let (mut tx, mut rx) = websocket.split();
+                async move {
+                    while let Some(result) = rx.next().await {
+                        let msg = match result {
+                            Ok(msg) => msg,
+                            Err(_) => {
+                                break;
+                            }
+                        };
+                        let _ = tx.send(msg).await;
+                    }
                 }
-            }
-            Err(_) => {
-                // Handle the error
-            }
-        }
-    }
+            })
+        });
+
+    let (_, server) = warp::serve(ws_route).bind_with_graceful_shutdown(addr, async {
+        ready_tx.send(()).unwrap();
+    });
+
+    server.await;
+    Ok(())
 }

@@ -1,31 +1,33 @@
-use my_rust_project::ws_server;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::connect_async;
-use futures_util::sink::SinkExt;
-use futures_util::stream::StreamExt;
-use std::net::SocketAddr;
+use tokio::net::TcpStream;
+use tungstenite::client;
+use tokio_tungstenite::tungstenite;
+use tokio::sync::oneshot;
 
 #[tokio::test]
-async fn test_websocket_connection() {
-    // Initialize WebSocket server using imported module
-    let addr = "127.0.0.1:3012".parse::<SocketAddr>().unwrap();
-    tokio::spawn(async move {
-        ws_server::start_ws_server(addr).await;
+async fn ws_test() {
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let server_address = "127.0.0.1:12345".parse().unwrap();
+    
+    // Start WebSocket server
+    let ws_server_handle = tokio::spawn(async {
+        crate::ws_server::start_ws_server(server_address, ready_tx).await.unwrap();
     });
 
-    // Wait a bit to ensure server has started.
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    // Wait for server to be ready
+    ready_rx.await.unwrap();
 
-    // WebSocket client
-    let (mut write, mut read) = connect_async("ws://127.0.0.1:3012")
-        .await
-        .unwrap()
-        .0
-        .split();
+    // Create a client connection.
+    let (socket, _) = client::connect_async(format!("ws://{}", server_address)).await.expect("Failed to connect");
+    let (mut write, mut read) = socket.split();
 
-    write.send(Message::text("Hello, server!")).await.unwrap();
-    if let Some(msg) = read.next().await {
-        let msg = msg.unwrap().to_text().unwrap();
-        assert_eq!(msg, "Hello from server!");
-    }
+    // Send message from client to server
+    write.send(tungstenite::protocol::Message::Text("Hello from client!".into())).await.unwrap();
+
+    // Receive server response
+    let msg = read.next().await.unwrap().unwrap();
+    let content = msg.to_text().unwrap();
+    assert_eq!(content, "Hello from client!");
+
+    // Close server
+    ws_server_handle.abort();
 }
